@@ -22,6 +22,148 @@ class Server;
 class ClientHandler;
 class ThreadPool;
 
+class ClientHandler
+{
+public:
+    ClientHandler(SOCKET clientSocket) : clientSocket(clientSocket) {}
+
+    void HandleRequest()
+    {
+        // This function will be called in a separate thread for each client
+        ParseRequest();
+        ResolveHostName();
+        ForwardRequest();
+        ReceiveResponse();
+        CleanUp();
+    }
+
+private:
+    SOCKET clientSocket;
+    SOCKET serverSocket;
+    std::string hostname;
+    std::string httpRequest; // Added to store the HTTP request
+
+    void ParseRequest()
+    {
+        std::array<char, 4096> buffer{};
+        int bytesReceived = recv(clientSocket, buffer.data(), static_cast<int>(buffer.size()), 0);
+        if (bytesReceived <= 0)
+        {
+            // Handle error or connection closed
+            std::cerr << "Receive failed or connection closed by client." << std::endl;
+            return;
+        }
+
+        // Assuming the request is null-terminated; otherwise, we need to add a null terminator
+        httpRequest.assign(buffer.data(), bytesReceived);
+        // Extract the Host header and the requested URL
+        // Here you would parse the httpRequest string to find the Host header and the path requested
+        // This is a simplified example and may need to be expanded based on actual request format
+        size_t hostHeaderIndex = httpRequest.find("Host: ");
+        if (hostHeaderIndex == std::string::npos)
+        {
+            std::cerr << "Host header not found in request." << std::endl;
+            return;
+        }
+        size_t hostEndIndex = httpRequest.find("\r\n", hostHeaderIndex);
+        hostname = httpRequest.substr(hostHeaderIndex + 6, hostEndIndex - (hostHeaderIndex + 6));
+        // You would also extract the path and any other relevant information from the request
+    }
+
+    void ResolveHostName()
+    {
+        struct addrinfo hints {}, * res;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC; // Use IPv4 or IPv6
+        hints.ai_socktype = SOCK_STREAM;
+
+        // Resolve the domain name into a list of addresses
+        int status = getaddrinfo(hostname.c_str(), "http", &hints, &res);
+        if (status != 0)
+        {
+            std::cerr << "DNS resolution failed for hostname: " << hostname << std::endl;
+            return;
+        }
+
+        // Here you would iterate through the addresses and try to connect
+        for (auto ptr = res; ptr != NULL; ptr = ptr->ai_next)
+        {
+            ConnectToHost(ptr);
+        }
+
+        freeaddrinfo(res); // Free the linked list
+    }
+
+    void ConnectToHost(addrinfo* addr)
+    {
+        // Connect to the first address we can
+        serverSocket = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+        if (serverSocket == INVALID_SOCKET)
+        {
+            std::cerr << "Error creating server socket." << std::endl;
+            return;
+        }
+
+        // Connect to the server
+        int connResult = connect(serverSocket, addr->ai_addr, (int)addr->ai_addrlen);
+        if (connResult == SOCKET_ERROR)
+        {
+            std::cerr << "Connection to server failed." << std::endl;
+            closesocket(serverSocket);
+            return;
+        }
+
+        // If connection is successful, save the serverSocket to class member for further use
+        this->serverSocket = serverSocket;
+    }
+
+    void ForwardRequest()
+    {
+        // Forward the request to the server
+        int sendResult = send(serverSocket, httpRequest.c_str(), static_cast<int>(httpRequest.size()) + 1, 0);
+        if (sendResult == SOCKET_ERROR)
+        {
+            std::cerr << "Error forwarding request to server." << std::endl;
+            return;
+        }
+    }
+
+    void ReceiveResponse()
+    {
+        std::array<char, 4096> buffer{};
+        // Receive the response from the server and forward it to the client
+        int bytesReceived;
+        do
+        {
+            bytesReceived = recv(serverSocket, buffer.data(), static_cast<int>(buffer.size()), 0);
+            if (bytesReceived > 0)
+            {
+                // Forward the received data to the client
+                send(clientSocket, buffer.data(), bytesReceived, 0);
+            }
+        } while (bytesReceived > 0);
+
+        if (bytesReceived == SOCKET_ERROR)
+        {
+            std::cerr << "Error receiving response from server." << std::endl;
+        }
+    }
+
+    void CleanUp()
+    {
+        // Close the client socket
+        if (clientSocket != INVALID_SOCKET)
+        {
+            closesocket(clientSocket);
+        }
+        // Close the server socket if it was used
+        if (serverSocket != INVALID_SOCKET)
+        {
+            closesocket(serverSocket);
+        }
+    }
+};
+
 class Server
 {
 public:
@@ -51,6 +193,7 @@ private:
     std::string port;
     SOCKET listenSocket;
     std::vector<std::thread> clientThreads;
+    std::string hostname;
 
     void AcceptConnections()
     {
@@ -113,10 +256,8 @@ private:
 
     void BindAndListen()
     {
-        sockaddr_in service;
-        service.sin_family = AF_INET;
-        service.sin_addr.s_addr = inet_addr("127.0.0.1");
-        service.sin_port = htons(std::stoi(port));
+        struct sockaddr_in service;
+        inet_pton(AF_INET, hostname.c_str(), &(service.sin_addr));
 
         if (bind(listenSocket, (SOCKADDR*)&service, sizeof(service)) == SOCKET_ERROR)
         {
@@ -153,150 +294,6 @@ private:
             {
                 thread.join();
             }
-        }
-    }
-};
-
-class ClientHandler
-{
-public:
-    ClientHandler(SOCKET clientSocket) : clientSocket(clientSocket) {}
-
-    void HandleRequest()
-    {
-        // This function will be called in a separate thread for each client
-        ParseRequest();
-        ResolveHostName();
-        ConnectToHost();
-        ForwardRequest();
-        ReceiveResponse();
-        CleanUp();
-    }
-
-private:
-    SOCKET clientSocket;
-    SOCKET serverSocket;
-    std::string hostname;
-
-    void ParseRequest()
-    {
-        std::array<char, 4096> buffer{};
-        int bytesReceived = recv(clientSocket, buffer.data(), buffer.size(), 0);
-        if (bytesReceived <= 0)
-        {
-            // Handle error or connection closed
-            std::cerr << "Receive failed or connection closed by client." << std::endl;
-            return;
-        }
-
-        // Assuming the request is null-terminated; otherwise, we need to add a null terminator
-        std::string requestStr(buffer.data(), bytesReceived);
-        // Extract the Host header and the requested URL
-        // Here you would parse the request string to find the Host header and the path requested
-        // This is a simplified example and may need to be expanded based on actual request format
-        size_t hostHeaderIndex = requestStr.find("Host: ");
-        if (hostHeaderIndex == std::string::npos)
-        {
-            std::cerr << "Host header not found in request." << std::endl;
-            return;
-        }
-        size_t hostEndIndex = requestStr.find("\r\n", hostHeaderIndex);
-        hostname = requestStr.substr(hostHeaderIndex + 6, hostEndIndex - (hostHeaderIndex + 6));
-        // You would also extract the path and any other relevant information from the request
-    }
-
-    void ResolveHostName()
-    {
-        struct addrinfo hints {}, * res;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC; // Use IPv4 or IPv6
-        hints.ai_socktype = SOCK_STREAM;
-
-        // Resolve the domain name into a list of addresses
-        int status = getaddrinfo(hostname.c_str(), "http", &hints, &res);
-        if (status != 0)
-        {
-            std::cerr << "DNS resolution failed for hostname: " << hostname << std::endl;
-            return;
-        }
-
-        // Here you would iterate through the addresses and try to connect
-        for (auto ptr = res; ptr != NULL; ptr = ptr->ai_next)
-        {
-            // Try to connect (see ConnectToHost)
-        }
-
-        freeaddrinfo(res); // Free the linked list
-    }
-
-    void ConnectToHost()
-    {
-        // Assume we have a sockaddr structure filled out called 'serverAddr'
-        // This would be obtained from the DNS resolution step
-        serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-        if (serverSocket == INVALID_SOCKET)
-        {
-            std::cerr << "Error creating server socket." << std::endl;
-            return;
-        }
-
-        // Connect to the server
-        int connResult = connect(serverSocket, &serverAddr, sizeof(serverAddr));
-        if (connResult == SOCKET_ERROR)
-        {
-            std::cerr << "Connection to server failed." << std::endl;
-            closesocket(serverSocket);
-            return;
-        }
-
-        // If connection is successful, save the serverSocket to class member for further use
-        this->serverSocket = serverSocket;
-    }
-
-    void ForwardRequest()
-    {
-        // Forward the request to the server
-        // Assume we have the request in a std::string named 'httpRequest'
-        int sendResult = send(serverSocket, httpRequest.c_str(), httpRequest.size() + 1, 0);
-        if (sendResult == SOCKET_ERROR)
-        {
-            std::cerr << "Error forwarding request to server." << std::endl;
-            return;
-        }
-    }
-
-    void ReceiveResponse()
-    {
-        std::array<char, 4096> buffer{};
-        // Receive the response from the server and forward it to the client
-        int bytesReceived;
-        do
-        {
-            bytesReceived = recv(serverSocket, buffer.data(), buffer.size(), 0);
-            if (bytesReceived > 0)
-            {
-                // Forward the received data to the client
-                send(clientSocket, buffer.data(), bytesReceived, 0);
-            }
-        } while (bytesReceived > 0);
-
-        if (bytesReceived == SOCKET_ERROR)
-        {
-            std::cerr << "Error receiving response from server." << std::endl;
-        }
-    }
-
-    void CleanUp()
-    {
-        // Close the client socket
-        if (clientSocket != INVALID_SOCKET)
-        {
-            closesocket(clientSocket);
-        }
-        // Close the server socket if it was used
-        if (serverSocket != INVALID_SOCKET)
-        {
-            closesocket(serverSocket);
         }
     }
 };
