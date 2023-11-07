@@ -8,7 +8,7 @@
  * \date   November 2nd, 2023
  *********************************************************************/
 
-#include "Server.hpp"
+#include "HTTP.hpp"
 
 int main(int argc, char* argv[])
 {
